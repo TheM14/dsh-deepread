@@ -1,15 +1,12 @@
-import { execFile } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { promisify } from 'node:util'
-
-const execFileAsync = promisify(execFile)
+import { npmExecFileAsync } from './npm-run.mjs'
 
 export async function npmPackFileList(root) {
   const cache = await mkdtemp(join(tmpdir(), 'dsh-deepread-npm-cache-'))
   try {
-    const { stdout } = await execFileAsync('npm', ['pack', '--dry-run', '--json', '--cache', cache], {
+    const { stdout } = await npmExecFileAsync(['pack', '--dry-run', '--json', '--cache', cache], {
       cwd: root,
       maxBuffer: 10 * 1024 * 1024,
     })

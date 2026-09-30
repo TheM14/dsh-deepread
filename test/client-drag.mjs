@@ -1,30 +1,21 @@
 import assert from 'node:assert/strict'
-import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRuntimeStub } from './helpers/client-runtime.mjs'
-import { clientSmokeHost } from './helpers/client-smoke-host.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const upstreamRoot = clientSmokeHost('CLIENT DRAG', [
-  'packages/client/modules/lib/types/client/system.js',
-  'packages/client/ui-slots/lib/types/index.js',
-  'packages/client/web-react/lib/types/index.js',
-])
-if (upstreamRoot === null) process.exit(0)
-const upstreamSystem = join(upstreamRoot, 'packages/client/modules/lib/types/client/system.js')
-const upstreamSlots = join(upstreamRoot, 'packages/client/ui-slots/lib/types/index.js')
-const upstreamRenderer = join(upstreamRoot, 'packages/client/web-react/lib/types/index.js')
 
-const upstreamRequire = createRequire(pathToFileURL(join(upstreamRoot, 'package.json')))
-const webReactRequire = createRequire(pathToFileURL(join(upstreamRoot, 'packages/client/web-react/package.json')))
-const reactDomRequire = createRequire(pathToFileURL(join(upstreamRoot, 'packages/test-support/client-runtime/package.json')))
-const { JSDOM } = await import(pathToFileURL(upstreamRequire.resolve('jsdom')).href)
-const React = await import(pathToFileURL(webReactRequire.resolve('react')).href)
-const { createRoot } = await import(pathToFileURL(reactDomRequire.resolve('react-dom/client')).href)
-const { ClientModuleSystem } = await import(pathToFileURL(upstreamSystem).href)
-const { SlotCore } = await import(pathToFileURL(upstreamSlots).href)
-const { createSlotRenderer, SessionProvider } = await import(pathToFileURL(upstreamRenderer).href)
+let JSDOM
+let React
+let createRoot
+try {
+  ({ JSDOM } = await import('jsdom'))
+  React = await import('react')
+  ;({ createRoot } = await import('react-dom/client'))
+} catch (error) {
+  console.log(`CLIENT DRAG SKIP: jsdom/react-dom are not installed in the plugin workspace (${error.code ?? error.message}). This does not validate real-DOM drag behavior.`)
+  process.exit(0)
+}
 
 const globalNames = [
   'window', 'document', 'navigator', 'HTMLElement', 'Element', 'Node', 'Event', 'PointerEvent',
@@ -73,52 +64,30 @@ browserWindow.HTMLElement.prototype.releasePointerCapture = function releasePoin
   captures.get(this)?.delete(pointerId)
 }
 
-function observable(value) {
-  const listeners = new Set()
-  return {
-    getSnapshot: () => value,
-    subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },
+// jsdom does not ship PointerEvent; the plugin only reads pointerId,
+// pointerType, and MouseEvent geometry, so a MouseEvent subclass suffices.
+if (typeof browserWindow.PointerEvent !== 'function') {
+  browserWindow.PointerEvent = class PointerEvent extends browserWindow.MouseEvent {
+    constructor(type, init = {}) {
+      super(type, init)
+      this.pointerId = init.pointerId ?? 1
+      this.pointerType = init.pointerType ?? ''
+    }
   }
 }
 
-function hostOver(core) {
-  const sessionInfo = observable({ sessionId: 'session-drag', hooks: {}, props: {} })
-  return {
-    subscribe: (key, listener) => core.subscribe(key, listener),
-    getVersion: (key) => core.getVersion(key),
-    entriesOf: (key) => core.entries(key),
-    entriesOfSlot: (key) => core.entriesOfSlot(key),
-    reportEntryError: (key, entry, error, info) => core.reportEntryError(key, entry, error, info),
-    specOf: (key) => core.specDynamic(key),
-    isLive: (entry) => core.isLive(entry),
-    storeOf: () => undefined,
-    sessions: {
-      list: observable({ ids: ['session-drag'], byId: {}, current: 'session-drag' }),
-      provideInfo: sessionInfo,
-    },
-    workspaces: { list: observable({ items: [], phase: 'ready' }) },
-  }
-}
-
-function effectContext(base) {
-  const disposers = []
-  const ctx = {
-    ...base,
-    effect(execute) {
-      const dispose = execute()
-      if (typeof dispose === 'function') disposers.push(dispose)
-      return () => {
-        const index = disposers.indexOf(dispose)
-        if (index !== -1) disposers.splice(index, 1)
-        if (typeof dispose === 'function') dispose()
-      }
-    },
-    dispose() {
-      for (const dispose of disposers.splice(0).reverse()) dispose()
-    },
-  }
-  return ctx
-}
+// Import the real bundle in this context (like the browser page does) so the
+// plugin components' free `window`/`document` references resolve to the JSDOM
+// globals installed above; real react-dom then runs their effects for real.
+let handoff = null
+browserWindow.__ModuleLoader__ = { load(value) { handoff = value } }
+await import(pathToFileURL(join(root, 'lib', 'client.js')).href + '?drag=' + Date.now())
+assert.notEqual(handoff, null, 'client bundle registers with the real module loader handoff')
+const plugin = handoff.factory((specifier) => {
+  if (specifier === 'react') return React
+  if (specifier === '@deepseek-ai/dsh-client-store') return createRuntimeStub()
+  throw new Error(`unexpected client dependency: ${specifier}`)
+})
 
 function pointer(type, pointerId, pointerType, clientX, clientY, init = {}) {
   return new browserWindow.PointerEvent(type, {
@@ -148,55 +117,92 @@ async function click(target) {
   })
 }
 
-const core = new SlotCore()
-const Frame = (props) => React.createElement(React.Fragment, null,
-  React.createElement(SessionProvider, null, () => props.renderSlot('conversation.input.left', {})),
-  props.renderSlot('shell.overlay', {}),
-)
-const disposeFrame = core.register({
-  name: 'root',
-  children: {
-    'shell.overlay': { kind: 'list', scope: 'root' },
-    'conversation.input.left': { kind: 'list', scope: 'session' },
-    'tool.call.toolview': { kind: 'keyed', scope: 'session' },
-  },
-}, Frame)
-const host = hostOver(core)
-const renderer = createSlotRenderer()
-let currentContext
-const slots = {
-  register: (...args) => core.register(...args),
-  inject(name, provider) {
-    assert.notEqual(core.specDynamic(name), undefined, `official slot ${name} must be declared before injection`)
-    return currentContext.effect(provider)
-  },
-}
-const createContext = () => {
-  currentContext = effectContext({
-    slots,
-    sessions: { list: { getSnapshot: () => ({ current: undefined }) } },
-    conversation: { input: { for() { throw new Error('not used') } } },
-  })
-  return currentContext
+// A DOM slot harness: same registration semantics as client-runtime.mjs, but
+// hook channels become real useSyncExternalStore subscriptions and
+// registrations return React elements for react-dom rendering. Slot
+// injections route through the caller's effect context so disposal unmounts
+// the registered contributions.
+function createDomSlotHarness(currentContext) {
+  const registrations = new Map()
+  const hookSources = []
+  const slots = {
+    inject(name, provider) {
+      return currentContext().effect(provider)
+    },
+    register(meta, component) {
+      const instance = typeof meta.store === 'function' ? meta.store().create() : meta.store?.create()
+      const injectedFace = typeof meta.inject === 'function'
+        ? meta.inject(...(instance === undefined ? [] : [instance.actions]))
+        : {}
+      const injected = { ...injectedFace }
+      for (const [name, source] of Object.entries(injectedFace.hooks ?? {})) {
+        const hookName = `use${name[0].toUpperCase()}${name.slice(1)}`
+        injected[hookName] = (selector) => React.useSyncExternalStore(
+          (listener) => source.subscribe(listener),
+          () => selector(source.getSnapshot()),
+        )
+        hookSources.push(source)
+      }
+      delete injected.hooks
+      const props = {
+        ...injected,
+        ...(instance === undefined ? {} : {
+          useStore: (selector) => selector(instance.getSnapshot()),
+          actions: instance.actions,
+        }),
+      }
+      const element = (owner = {}) => React.createElement(component, { ...owner, ...props })
+      registrations.set(meta.name, element)
+      return () => { registrations.delete(meta.name) }
+    },
+  }
+  return { slots, registrations, hookSources }
 }
 
-const system = new ClientModuleSystem({
-  modules: [{ id: 'dsh-deepread', url: pathToFileURL(join(root, 'lib', 'client.js')).href, rev: 'drag-dom-test' }],
-  staticModules: { react: React, '@deepseek-ai/dsh-client-store': createRuntimeStub() },
-  loadBundle: async (url) => { await import(url + '?loader=' + Date.now()) },
-})
-browserWindow.__ModuleLoader__ = globalThis.__ModuleLoader__
+function effectContext(base) {
+  const disposers = []
+  const ctx = {
+    ...base,
+    effect(execute) {
+      const dispose = execute()
+      if (typeof dispose === 'function') disposers.push(dispose)
+      return () => {
+        const index = disposers.indexOf(dispose)
+        if (index !== -1) disposers.splice(index, 1)
+        if (typeof dispose === 'function') dispose()
+      }
+    },
+    dispose() {
+      for (const dispose of disposers.splice(0).reverse()) dispose()
+    },
+  }
+  return ctx
+}
+
+const ctxHolder = { current: undefined }
+const harness = createDomSlotHarness(() => ctxHolder.current)
+const ComposerElement = () => harness.registrations.get('conversation.input.left')({})
+const PanelElement = () => harness.registrations.get('shell.overlay')()
 
 let reactRoot
 let ctx
 try {
-  const mod = await system.import('dsh-deepread')
-  ctx = createContext()
-  mod.apply(ctx)
+  ctx = effectContext({
+    slots: harness.slots,
+    uiSession: { adapter: { current: { getSnapshot: () => ({ key: undefined }) } } },
+    conversation: { input: { shell() { throw new Error('not used') } } },
+  })
+  ctxHolder.current = ctx
+  plugin.apply(ctx)
+  assert.equal(harness.registrations.size, 3, 'apply registers the three client slots')
   const container = browserWindow.document.getElementById('app')
+  const App = () => React.createElement(React.Fragment, null,
+    harness.registrations.has('conversation.input.left') ? ComposerElement() : null,
+    harness.registrations.has('shell.overlay') ? PanelElement() : null,
+  )
   reactRoot = createRoot(container)
   await React.act(async () => {
-    reactRoot.render(renderer.renderRoot(host, {}))
+    reactRoot.render(React.createElement(App))
     await Promise.resolve()
   })
 
@@ -205,7 +211,7 @@ try {
   const header = () => browserWindow.document.querySelector('.dr-panel-head')
   const close = () => browserWindow.document.querySelector('.dr-close')
   await click(composer())
-  assert.ok(panel(), 'official loader and slot renderer mount the panel into real DOM')
+  assert.ok(panel(), 'real react-dom mounts the plugin panel into a real DOM')
 
   let panelWidth = 420
   const panelHeight = 500
@@ -261,8 +267,8 @@ try {
   await dispatch(close(), pointer('pointerdown', 10, 'mouse', 760, 580))
   assert.equal(header().hasPointerCapture(10), false, 'interactive title descendants do not start drag')
   assert.equal(panel().style.cssText, positionBeforeClose, 'close pointerdown causes zero position change')
-  assert.equal(panel().onpointerdown, null, 'content panel does not own a pointerdown handler')
-  assert.equal(browserWindow.document.querySelector('.dr-input').onpointerdown, null, 'inputs do not own the title drag handler')
+  assert.ok(panel().onpointerdown == null, 'content panel does not own a pointerdown handler')
+  assert.ok(browserWindow.document.querySelector('.dr-input').onpointerdown == null, 'inputs do not own the title drag handler')
 
   assert.equal(windowListeners.get('resize')?.size, 1, 'one component resize listener is mounted')
   browserWindow.innerWidth = 300
@@ -308,7 +314,10 @@ try {
   await React.act(async () => { reactRoot.unmount(); await Promise.resolve() })
   assert.equal(windowListeners.get('resize')?.size ?? 0, 0, 'DOM unmount removes the resize listener')
   reactRoot = createRoot(container)
-  await React.act(async () => { reactRoot.render(renderer.renderRoot(host, {})); await Promise.resolve() })
+  await React.act(async () => {
+    reactRoot.render(React.createElement(App))
+    await Promise.resolve()
+  })
   assert.equal(panel().style.cssText, retainedPosition, 'same-apply DOM remount retains position')
   assert.equal(windowListeners.get('resize')?.size, 1, 'same-apply remount installs one resize listener')
 
@@ -319,17 +328,26 @@ try {
   const capturedHeader = header()
   await React.act(async () => {
     ctx.dispose()
+    reactRoot.render(React.createElement(App))
     await Promise.resolve()
   })
   assert.equal(capturedHeader.hasPointerCapture(14), false, 'plugin disposal releases active capture')
   assert.equal(windowListeners.get('resize')?.size ?? 0, 0, 'plugin disposal removes the window listener')
   assert.equal(browserWindow.document.querySelectorAll('style[data-plugin="dsh-deepread"]').length, 0, 'plugin disposal removes styles')
-  assert.equal(core.entries('shell.overlay').length, 0, 'plugin disposal removes the official slot contribution')
+  assert.equal(harness.registrations.size, 0, 'plugin disposal removes the slot contributions')
   assert.equal(browserWindow.localStorage.length, 0, 'drag position is never persisted')
 
-  ctx = createContext()
-  mod.apply(ctx)
-  await React.act(async () => { await Promise.resolve() })
+  ctx = effectContext({
+    slots: harness.slots,
+    uiSession: { adapter: { current: { getSnapshot: () => ({ key: undefined }) } } },
+    conversation: { input: { shell() { throw new Error('not used') } } },
+  })
+  ctxHolder.current = ctx
+  plugin.apply(ctx)
+  await React.act(async () => {
+    reactRoot.render(React.createElement(App))
+    await Promise.resolve()
+  })
   await click(composer())
   assert.equal(panel().style.cssText, '', 'a fresh apply lifecycle starts at the CSS default position')
 
@@ -341,13 +359,11 @@ try {
 } finally {
   if (ctx !== undefined) ctx.dispose()
   if (reactRoot !== undefined) await React.act(async () => { reactRoot.unmount() })
-  disposeFrame()
   dom.window.close()
-  delete globalThis.__ModuleLoader__
   for (const [name, descriptor] of Object.entries(previousGlobals)) {
     if (descriptor === undefined) delete globalThis[name]
     else Object.defineProperty(globalThis, name, descriptor)
   }
 }
 
-console.log('CLIENT DRAG: real DOM PointerEvents pass through the official loader, SlotCore, and slot renderer')
+console.log('CLIENT DRAG: real DOM PointerEvents pass through the plugin components with real react-dom')

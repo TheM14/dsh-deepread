@@ -1,13 +1,21 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // Exact validation boundary, not a claim that all newer prerelease APIs are compatible.
-export const validatedHostVersion = '0.1.2-rc.1'
+// 0.2.0-rc.2 ships the client module system as published packages inside the
+// desktop runtime tree (`node_modules/@deepseek-ai/...`), not as monorepo
+// `packages/client/...` sources.
+export const validatedHostVersion = '0.2.0-rc.2'
+
+// Default probe: a runtime tree unpacked next to this repository (the desktop
+// app.asar `dsh/` payload). Override with DSH_HARNESS_ROOT when it lives elsewhere.
+const defaultRoot = join(dirname(dirname(dirname(fileURLToPath(import.meta.url)))), '..', 'dsh-ref', 'dsh')
 
 export function clientSmokeHost(label, requiredFiles) {
-  const root = process.env.DSH_HARNESS_ROOT ?? '/Users/xiehuan/Desktop/project/deepseek-harness'
+  const root = process.env.DSH_HARNESS_ROOT ?? defaultRoot
   const skip = (reason) => {
-    console.log(`${label} SKIP: ${reason}; checkout: ${root}. Set DSH_HARNESS_ROOT to a built DeepSeek Harness ${validatedHostVersion} checkout. This does not validate real-host compatibility.`)
+    console.log(`${label} SKIP: ${reason}; checkout: ${root}. Set DSH_HARNESS_ROOT to an unpacked DeepSeek Harness ${validatedHostVersion} runtime tree (the app.asar dsh/ payload). This does not validate real-host compatibility.`)
     return null
   }
 

@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { npmExecFileSync } from './helpers/npm-run.mjs'
 import { createEffectContext, createRuntimeStub, createSlotHarness } from './helpers/client-runtime.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const upstreamRoot = process.env.DSH_HARNESS_ROOT ?? '/Users/xiehuan/Desktop/project/deepseek-harness'
+const upstreamRoot = process.env.DSH_HARNESS_ROOT ?? join(root, '..', 'dsh-ref', 'dsh')
 const forbiddenThemeColorPattern = /#[0-9a-f]{3,8}\b|\brgba?\(|\bhsla?\(|(?:^|[,\s:(])(?:white|black|red|yellow|green|blue)(?=[\s,;/)}]|$)/i
-// Audited against DeepSeek Harness 0.1.0-rc.7 ui-theme. This is deliberately
-// a consumer allowlist: a new CSS token must be reviewed against the host
-// contract before the plugin can use it.
+// Audited against the DeepSeek Harness ui-theme semantic contract. This is
+// deliberately a consumer allowlist: a new CSS token must be reviewed against
+// the host contract before the plugin can use it.
 const approvedThemeTokens = new Set([
   '--dsw-alias-bg-base',
   '--dsw-alias-bg-layer-1',
@@ -41,21 +41,21 @@ const approvedThemeTokens = new Set([
   '--dsw-shadow-lv3',
 ])
 
-const upstreamTokenFiles = [
-  join(upstreamRoot, 'packages/client/ui-theme/src/styles/design-platform.css'),
-  join(upstreamRoot, 'packages/client/ui-theme/src/styles/gradient-shadow-text.css'),
-]
-if (upstreamTokenFiles.every(existsSync)) {
+// Cross-check against the shipped ui-theme client bundle (the authoritative
+// runtime token definitions in a 0.2.0-rc.2 tree). Skipped silently when the
+// tree is absent; the allowlist above still gates every consumed token.
+const themeBundle = join(upstreamRoot, 'node_modules', '@deepseek-ai', 'dsh-client-ui-theme', 'lib', 'client.js')
+if (existsSync(themeBundle)) {
   const upstreamTokens = new Set(
-    [...upstreamTokenFiles.map((file) => readFileSync(file, 'utf8')).join('\n').matchAll(/(--dsw-[a-z0-9-]+)\s*:/g)]
+    [...readFileSync(themeBundle, 'utf8').matchAll(/(--dsw-[a-z0-9-]+)\s*:/g)]
       .map((match) => match[1]),
   )
   for (const token of approvedThemeTokens) {
-    assert.ok(upstreamTokens.has(token), `${token} remains defined by the local rc.7 ui-theme source`)
+    assert.ok(upstreamTokens.has(token), `${token} remains defined by the shipped ui-theme bundle`)
   }
 }
 
-execFileSync('npm', ['run', 'build:client'], { cwd: root, stdio: 'pipe' })
+npmExecFileSync(['run', 'build:client'], { cwd: root, stdio: 'pipe' })
 
 const styleNodes = []
 const previousDocument = globalThis.document
@@ -126,8 +126,8 @@ const module = handoff.factory((specifier) => {
 const harness = createSlotHarness()
 const ctx = createEffectContext({
   slots: harness.slots,
-  sessions: { list: { getSnapshot: () => ({ current: undefined }) } },
-  conversation: { input: { for() { throw new Error('not used') } } },
+  uiSession: { adapter: { current: { value: { key: undefined } } } },
+  conversation: { input: { shell() { throw new Error('not used') } } },
 })
 
 try {

@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import { npmExecFileAsync } from './helpers/npm-run.mjs'
 
 const execFileAsync = promisify(execFile)
 const testDir = dirname(fileURLToPath(import.meta.url))
@@ -11,7 +12,7 @@ const root = dirname(testDir)
 const hostConfig = JSON.parse(await readFile(join(root, 'tsconfig.host.json'), 'utf8'))
 
 assert.equal(hostConfig.compilerOptions.strict, true)
-await execFileAsync('npm', ['run', 'typecheck:host'], { cwd: root })
+await npmExecFileAsync(['run', 'typecheck:host'], { cwd: root })
 await execFileAsync(process.execPath, [
   join(root, 'node_modules', 'typescript', 'bin', 'tsc'),
   '--project',

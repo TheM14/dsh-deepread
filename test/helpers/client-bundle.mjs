@@ -93,10 +93,8 @@ export async function loadClientBundle(root, fixture) {
   const submissions = []
   const ctx = createEffectContext({
     slots: harness.slots,
-    sessions: {
-      list: { getSnapshot: () => ({ current: 'session-test' }) },
-      scope: () => ({}),
-    },
+    uiSession: { adapter: { current: { getSnapshot: () => ({ key: 'session-test' }) } } },
+    sessions: { scope: () => ({}) },
     conversation: {
       input: {
         for: () => ({

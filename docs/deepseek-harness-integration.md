@@ -5,15 +5,14 @@
 ## 已核对基线
 
 - 上游仓库：`deepseek-ai/deepseek-harness`
-- 本地上游路径：`/Users/xiehuan/Desktop/project/deepseek-harness`
-- 核对版本：`0.1.2-rc.1`
-- 核对提交：`a66e4702047846cdaa10c66c9d3df3951f5ea70d`（2026-09-03）
-- 本插件提交基线：`cbfffab353112180456a6c26ed83de092d54ac12`
-- 核对日期：2026-09-10
+- 本地上游权威来源：从桌面版 app.asar 解出的运行时树（`@deepseek-ai/dsh-desktop-runtime@0.2.0-rc.2`），默认位于仓库同级 `../dsh-ref/dsh`，或 `DSH_HARNESS_ROOT` 指向的等价树
+- 核对版本：`0.2.0-rc.2`
+- 本插件适配版本：`1.1.0`
+- 核对日期：2026-09-30
 
-上游仍处于预发布阶段。修改宿主接口相关代码前，应先在本地上游重新核对文档和源码，而不是把本文当成永久不变的 API 规范。
+上游仍处于预发布阶段，且宿主发布形态已从 monorepo 源码变为 npm 发布包。修改宿主接口相关代码前，应先在本地运行时树重新核对包内容与文档，而不是把本文当成永久不变的 API 规范。
 
-当前发布兼容基线还包括 dsh-TUI `0.8.1` / Community Consensus v0.15。包要求 Node.js `^22.19 || >=24`；同一个 tarball 在 Harness Web、Harness headless 与 dsh-TUI 中共享 Host 工具和 skill，浏览器 UI 只是 Harness Web 的可选入口。
+当前发布兼容基线为 Harness Web / Harness Desktop `0.2.0-rc.2`，另含 dsh-TUI `0.8.1` / Community Consensus v0.15。包要求 Node.js `^22.19 || >=24`；同一个 tarball 在 Harness Web、Harness headless 与 dsh-TUI 中共享 Host 工具和 skill，浏览器 UI 只是 Harness Web 的可选入口。
 
 ## 一张图理解装载链路
 
@@ -122,9 +121,9 @@ window.__ModuleLoader__.load({
 4. 运行 `npm test`；
 5. 对装载或 UI 生命周期变化，在真实 Harness Web profile 中验证。
 
-上游的 `clientBundle` 预设没有作为已发布包暴露；上游文档明确要求 out-of-tree 插件自行复刻该构建。这里由 tsdown 负责模块转换和 factory 产物生成，不再把 JavaScript 源文本手工拼进 loader wrapper。升级 Harness 时仍须重新核对 `packages/client/tsdown.client.ts`、`ClientPluginHandoff` 和 factory `require` 规则。
+上游的 `clientBundle` 预设没有作为已发布包暴露；上游文档明确要求 out-of-tree 插件自行复刻该构建。这里由 tsdown 负责模块转换和 factory 产物生成，不再把 JavaScript 源文本手工拼进 loader wrapper。升级 Harness 时仍须重新核对 `ClientPluginHandoff` 与 factory `require` 规则；tsdown 预设源（源码 checkout 的 `packages/client/tsdown.client.ts`）在运行时树内没有发布对应物，预设本身也仍未作为可安装包发布。
 
-### 0.1.2-rc.1 共享模块迁移
+### 0.1.2-rc.1 共享模块迁移（历史记录）
 
 `dsh-deepread@1.0.1` 的 Web client 面向 Harness `0.1.2-rc.1`。旧的 `@deepseek-ai/dsh-client-runtime/client` 已不在宿主模块表中；`createSnapshotStore` 和 `ObservableSnapshot` 改从 `@deepseek-ai/dsh-client-store` 获取，Context 类型来自 `@deepseek-ai/cordis`。浏览器构建保留 `react` 和 `@deepseek-ai/dsh-client-store` 为 external，后者是 `packages/client/web/src/platform.ts` 声明的共享静态模块，无需添加 `dsh.client.external`。
 
@@ -132,15 +131,31 @@ window.__ModuleLoader__.load({
 
 `test/client-platform.mjs` 拒绝旧 runtime 请求，并在本地上游可用时对照当前 platform 源码及 loader 验证。真实 Web 验证必须使用版本匹配的宿主产物：源码 checkout 的 tag 不证明磁盘上的 `lib/` 或 `dist/` 已重建。
 
+### 0.2.0-rc.2 桌面版迁移
+
+`dsh-deepread@1.1.0` 面向 Harness `0.2.0-rc.2`（桌面版）。该版本宿主的发布形态从 monorepo `packages/client/...` 源码变为 npm 发布包（运行时树 `node_modules/@deepseek-ai/...`），核对对象相应从源码 checkout 换为运行时树。
+
+**当前会话与提交通道。** `sessions.list` 的 snapshot 初始 shape 为 `{ids, byId, phase, projectionsBySession}`，projectList 不再写 `current` 字段。“当前会话”迁移到 `@deepseek-ai/dsh-client-ui-session` 的 `uiSession` 服务：`ctx.uiSession.adapter.current` 是 binding source（类型为 `HostObservable<StandardSourceBinding>`，运行时源对象带 `.value`，其 `.key` 即当前 session id；一方消费示例：`dsh-client-ui-sidebar-right`）。插件的提交入口相应迁移：`ctx.uiSession.adapter.current.getSnapshot().key` 取当前 session id，再经 `ctx.sessions.scope(id)` 解析 retained scope、`ctx.conversation.input.for(actx)` 写入草稿并 `submit('queue')`。`SessionInputResolver` 的公开类型只声明 `for(actx)`；`shell(sessionId)` 在运行时实现上存在（`InputHub` 的 service-face 路径）但未进入公开类型，插件不直接依赖它。浏览器 `exports.inject` 增加 `uiSession`，变为 `['slots', 'sessions', 'conversation', 'uiSession']`；`package.json#dsh.client.inject` 同步增加 `@deepseek-ai/dsh-client-ui-session`，并在 `src/client/index.ts` 新增 `@deepseek-ai/dsh-client-ui-session/client` 的 type-only import。
+
+**slot 排序。** 三个 UI slot 仍在且语义不变（`shell.overlay` list/root、`conversation.input.left` list/session、`tool.call.toolview` keyed/session），`ctx.slots.inject(name, () => ctx.slots.register(...))` 仍是一方模式。注意 SlotCore.register 现在以 `priority`（默认 `0`，lowest renders）为主排序键，`order` 退居 list 类型的次级排序字段；插件现有的 `order: 10/30` 仍生效，无需改动。
+
+**客户端模块系统。** C6 handoff（`window.__ModuleLoader__.load({id, factory})`）、`dsh.client` 字段（platform/inject/external/immediately）与 `exports["./client"]` 解析、`??<id>/client.js&rev=<hash>` 组合 URL 均不变。变化集中在构造与启动：`ClientModuleSystem` 构造签名变为 `{manifest, staticModules, registrationTarget, bootstrapModule, loadBundle}`，其中 `registrationTarget` 是 HTML 预装的 queue 模式 facade（`{mode: 'queue', pendingQueue, load}`），构造器接管后切 live；manifest 由 `parseBootManifest(boot)` 解析，boot graph 为 `{rev, entries: [{id, url, rev}], batches: [{phase: 'bootstrap' | 'application', url, rev, entries}]}`；另有工厂函数 `createClientModuleSystem(target, bootstrapModule, options)`。web 前端 boot 使用 `__ModuleLoader__.create({boot: __DSH_BOOT__, staticModules, ...})`。
+
+**平台静态模块表。** web-frontend dist 资产内的 `rM()` 函数静态声明：`react`、`react/jsx-runtime`、`react-dom`、`react-dom/client`、`@deepseek-ai/cordis`、`@deepseek-ai/dsh-client-store`、`@deepseek-ai/dsh-client-ui-slots`、`@deepseek-ai/dsh-client-ui-primitives`、`@deepseek-ai/dsh-client-ui-dockkit`。插件的 externals（`react`、`@deepseek-ai/dsh-client-store`）都在表内，仍无需 `dsh.client.external`。
+
+**主题 token。** `--dsw-alias-*` 的运行时定义移入 `@deepseek-ai/dsh-client-ui-theme` 的 client bundle，前端 dist CSS 不再静态定义它们。`createSnapshotStore` / `defineStore` 仍从 `@deepseek-ai/dsh-client-store` 导出。Host 侧全部兼容未变（defineTool、tools.register、skills.register、webServer.register、storageDomain.open/table、jobs.start、llm.stream、web.fetch、fs、agentDefaultModel.currentSelection）。
+
+**插件与测试改动。** `package.json` 版本升至 `1.1.0`，devDependencies 全量 `0.1.2-rc.1` → `0.2.0-rc.2`，并新增 `jsdom ^26.1.0` 与 `react-dom ^18.3.1`（真实 DOM 拖拽测试用）。测试迁移：`test/helpers/client-smoke-host.mjs` 的 `validatedHostVersion` 改为 `0.2.0-rc.2`，默认根改为仓库同级 `../dsh-ref/dsh`（`DSH_HARNESS_ROOT` 可覆盖）；新增 `test/helpers/client-module-system.mjs`，在 VM 中提取发布 bundle 的 `ClientModuleSystem` / `parseBootManifest`，按 queue facade + boot graph 构造真实 loader；`client-lifecycle.mjs` / `client-platform.mjs` 迁移到新构造；`client-platform` 的平台种子对照改为检查 web-frontend dist 资产文本包含所需 specifier；`client-drag.mjs` 重写为 react-dom + jsdom 直挂插件组件，不再依赖上游 web-react/jsdom test-support 源码；`client-theme-contract.mjs` 的 token 对照源改为 `dsh-client-ui-theme` 运行时 bundle；`client-smoke-preflight.mjs` 适配新门控（fixture 路径 `node_modules/@deepseek-ai/dsh-client-modules/lib/client.js`，版本样例 `0.2.1-alpha.1` / `0.1.2-rc.1` / `0.2.0-rc.1`）。
+
 ### 真实 loader 测试的版本边界
 
-`test/client-lifecycle.mjs`、`test/client-drag.mjs` 和 `test/client-platform.mjs` 的真实宿主部分目前只验证 **`0.1.2-rc.1`**，不声明支持一个开放的版本区间。它们在导入宿主模块前读取 `DSH_HARNESS_ROOT/package.json` 的版本；未设置变量时使用上面的本地上游路径。
+`test/client-lifecycle.mjs` 和 `test/client-platform.mjs` 的真实宿主部分目前只验证 **`0.2.0-rc.2`**，不声明支持一个开放的版本区间。它们在导入宿主模块前读取 `DSH_HARNESS_ROOT/package.json` 的版本；未设置变量时默认使用仓库同级的 `../dsh-ref/dsh` 运行时树。`test/client-drag.mjs` 已重写为本地 react-dom + jsdom 直挂插件组件，不再 gate 宿主 checkout。
 
-- 版本不等于 `0.1.2-rc.1`（包括 `0.1.3-alpha.1`）、版本无法读取，或所需文件缺失时，打印带宿主版本或具体缺失路径、checkout 路径和已验证版本的 `SKIP`，然后正常退出。`client-platform` 仍执行本地 bundle 的模块请求断言。
+- 版本不等于 `0.2.0-rc.2`（包括 `0.2.1-alpha.1`、`0.1.2-rc.1`、`0.2.0-rc.1`）、版本无法读取，或所需文件缺失时，打印带宿主版本或具体缺失路径、运行时树路径和已验证版本的 `SKIP`，然后正常退出。所需文件按 npm 发布布局检查，例如 `node_modules/@deepseek-ai/dsh-client-modules/lib/client.js`。`client-platform` 仍执行本地 bundle 的模块请求断言。
 - `SKIP` 不代表真实 loader、slot 或新版宿主兼容性已通过验证。`test/client-smoke-preflight.mjs` 覆盖这些前置检查，已纳入 `npm test`。
-- 版本与文件检查通过后，真实导入和测试失败仍直接报错；不会将实际回归转换为 `SKIP`。匹配版本号也不能证明构建产物与源码一致，运行前仍须核对或重建宿主产物。
+- 版本与文件检查通过后，真实导入和测试失败仍直接报错；不会将实际回归转换为 `SKIP`。匹配版本号也不能证明运行时树内容未被改动，运行前仍须核对所用发布包。
 
-较新核心的 `ClientModuleSystem` 要求 `manifest`、`registrationTarget`、`bootstrapModule`，且已移除旧 `web-react` 包路径。本次修复采用显式版本边界；迁移测试构造参数和 renderer 路径、扩大验证范围需要另行完成真实宿主验证。
+真实 loader 由 `test/helpers/client-module-system.mjs` 构造：在 VM 中提取发布 bundle 的 `ClientModuleSystem` / `parseBootManifest`，按 HTML 预装的 queue facade + boot graph 组装，与 0.2.0-rc.2 前端 boot 的 `__ModuleLoader__.create({boot: __DSH_BOOT__, staticModules, ...})` 同源。
 
 ## 三个 UI slot
 
@@ -156,11 +171,12 @@ window.__ModuleLoader__.load({
 
 ### 浏览器 `exports.inject`
 
-浏览器 bundle 导出的 `inject = ['slots', 'sessions', 'conversation']` 是客户端 Cordis 服务激活条件：
+浏览器 bundle 导出的 `inject = ['slots', 'sessions', 'conversation', 'uiSession']` 是客户端 Cordis 服务激活条件：
 
 - `slots` 用于 UI 组合；
-- `sessions` 用于定位当前会话；
-- `conversation` 用于写入并提交精读指令。
+- `sessions` 用于订阅会话列表与 snapshot 数据；
+- `conversation` 用于写入并提交精读指令；
+- `uiSession` 用于定位当前会话：`ctx.uiSession.adapter.current` 是 binding source，`.value.key` 为当前 session id。
 
 组件不应直接持有 `ctx`。当前面板通过 `shell.overlay` 注册项的 `inject` 回调接收普通 `submitDeepread` 函数，这符合宿主的 ctx discipline。
 
@@ -260,17 +276,13 @@ dsh --profile web --dump-config
 
 ## 上游事实来源
 
-每次升级优先查看这些文件（路径相对 `deepseek-harness` 上游仓库）：
+`0.2.0-rc.2` 起宿主以 npm 发布包分发，默认核对对象是运行时树（仓库同级 `../dsh-ref/dsh` 或 `DSH_HARNESS_ROOT` 指向的等价树）。每次升级优先查看这些位置（路径相对运行时树根）：
 
-- `apps/cli/reference/README.md`：profile、plugin add/remove、层优先级、Web alias；
-- `apps/cli/src/plugin.ts`：安装完成后的 bundle reconciliation；
-- `packages/boot/app-boot/src/profile.ts`：bundle 解析和 profile composition；
-- `docs/subsystems/client-modules.md`：客户端图、bundle route、HMR；
-- `packages/client/modules/src/index.ts`：`dsh.client` 和 `exports["./client"]` 解析；
-- `packages/client/modules/src/client/system.ts`：`__ModuleLoader__`、factory、module table；
-- `packages/client/modules/src/client/manifest.ts`：C6 handoff 类型；
-- `packages/client/ui-slots/README.md`：slot 声明、注册、store 和 disposal；
-- `packages/client/AGENTS.md`：浏览器插件当前强制约束；
-- `docs/web-styling.md`：主题和 semantic token 规则。
+- `node_modules/@deepseek-ai/dsh-client-modules/`（README.md、`lib/index.js`、`lib/client.js`）：`dsh.client` 与 `exports["./client"]` 解析、`__ModuleLoader__`、factory、module table、`ClientModuleSystem` / `parseBootManifest` 与 C6 handoff 类型；
+- `node_modules/@deepseek-ai/dsh-client-ui-slots/`（README.md + `lib/index.js`）：slot 声明、注册、`priority` / `order` 排序、store 和 disposal；
+- `node_modules/@deepseek-ai/dsh-client-ui-session/`：`uiSession` 服务与 `adapter.current` binding source（一方消费示例：`dsh-client-ui-sidebar-right`）；
+- `node_modules/@deepseek-ai/dsh-client-ui-theme/`：`--dsw-alias-*` token 的运行时定义；
+- web-frontend dist 资产（内嵌 `rM()` 平台静态模块表）：平台 seed 清单；
+- `apps/cli/reference/README.md`（profile、plugin add/remove、层优先级、Web alias）、`apps/cli/src/plugin.ts`（bundle reconciliation）、`packages/boot/app-boot/src/profile.ts`（bundle 解析和 profile composition）、`packages/client/AGENTS.md`（浏览器插件约束）、`docs/web-styling.md`（主题和 semantic token 规则）：这些 monorepo 路径在运行时树中没有发布对应物，仅适用于源码 checkout，核对时以官方文档或源码为准。
 
 若本文与这些当前来源冲突，以当前上游来源为准，并在同一次插件改动中更新本文。

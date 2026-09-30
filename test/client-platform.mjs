@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import vm from 'node:vm'
+import { createModuleSystem, loadClientModuleSystem } from './helpers/client-module-system.mjs'
 import { createRuntimeStub } from './helpers/client-runtime.mjs'
 import { clientSmokeHost } from './helpers/client-smoke-host.mjs'
 
@@ -11,7 +12,7 @@ const bundle = readFileSync(join(root, 'lib/client.js'), 'utf8')
 let handoff
 vm.runInNewContext(bundle, { window: { __ModuleLoader__: { load(value) { handoff = value } } } })
 
-// Only these platform identities are consumed by DeepRead on Harness 0.1.2-rc.1.
+// Only these platform identities are consumed by DeepRead on Harness 0.2.0-rc.2.
 // Do not seed the removed runtime/client facade: that hid issue #10.
 const staticModules = { react: {}, '@deepseek-ai/dsh-client-store': createRuntimeStub() }
 const requested = []
@@ -24,23 +25,29 @@ assert.equal(typeof plugin.apply, 'function')
 assert.deepEqual(requested.sort(), Object.keys(staticModules).sort())
 
 const upstreamRoot = clientSmokeHost('CLIENT PLATFORM REAL LOADER', [
-  'packages/client/modules/lib/types/client/system.js',
-  'packages/client/web/src/platform.ts',
+  'node_modules/@deepseek-ai/dsh-client-modules/lib/client.js',
+  'node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html',
 ])
 if (upstreamRoot !== null) {
-  const systemPath = join(upstreamRoot, 'packages/client/modules/lib/types/client/system.js')
-  // Read the current upstream platform source, not an invented compatibility shim.
-  const { PLATFORM_MODULES } = await import(pathToFileURL(join(upstreamRoot, 'packages/client/web/src/platform.ts')).href)
-  for (const specifier of requested) assert.ok(PLATFORM_MODULES.includes(specifier), `${specifier} is an upstream platform seed`)
-  const { ClientModuleSystem } = await import(pathToFileURL(systemPath).href)
+  const systemExports = loadClientModuleSystem(upstreamRoot)
+  // Cross-check the requested seeds against the shipped web frontend: its
+  // boot bundle materializes the platform module table the loader seeds.
+  const assetsDir = join(upstreamRoot, 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist', 'assets')
+  const frontendAssets = readdirSync(assetsDir).filter((name) => name.endsWith('.js'))
+  const frontendText = frontendAssets.map((name) => readFileSync(join(assetsDir, name), 'utf8')).join('\n')
+  for (const specifier of requested) {
+    assert.ok(frontendText.includes(specifier), `${specifier} is declared by the shipped frontend platform module table`)
+  }
+  const { system, facade } = createModuleSystem(systemExports, {
+    url: pathToFileURL(join(root, 'lib/client.js')).href,
+    staticModules,
+    rev: 'platform-test',
+    loadBundle: (url) => import(url.split('?')[0] + '?platform=' + Date.now()),
+  })
   const previousWindow = globalThis.window
   globalThis.window = globalThis
+  globalThis.__ModuleLoader__ = facade
   try {
-    const system = new ClientModuleSystem({
-      modules: [{ id: 'dsh-deepread', url: pathToFileURL(join(root, 'lib/client.js')).href, rev: 'platform-test' }],
-      staticModules,
-      loadBundle: (url) => import(url),
-    })
     assert.equal(typeof (await system.import('dsh-deepread')).apply, 'function')
   } finally {
     delete globalThis.__ModuleLoader__

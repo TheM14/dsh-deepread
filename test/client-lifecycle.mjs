@@ -2,13 +2,15 @@ import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createModuleSystem, loadClientModuleSystem } from './helpers/client-module-system.mjs'
 import { createEffectContext, createRuntimeStub, createSlotHarness } from './helpers/client-runtime.mjs'
 import { clientSmokeHost } from './helpers/client-smoke-host.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const upstreamRoot = clientSmokeHost('CLIENT LIFECYCLE', ['packages/client/modules/lib/types/client/system.js'])
+const upstreamRoot = clientSmokeHost('CLIENT LIFECYCLE', [
+  'node_modules/@deepseek-ai/dsh-client-modules/lib/client.js',
+])
 if (upstreamRoot === null) process.exit(0)
-const upstreamSystem = join(upstreamRoot, 'packages/client/modules/lib/types/client/system.js')
 
 const styleNodes = []
 const documentStub = {
@@ -69,17 +71,19 @@ globalThis.addEventListener = (type, listener) => {
 globalThis.removeEventListener = (type, listener) => {
   windowListeners.get(type)?.delete(listener)
 }
-const { ClientModuleSystem } = await import(pathToFileURL(upstreamSystem).href)
-const system = new ClientModuleSystem({
-  modules: [{ id: 'dsh-deepread', url: pathToFileURL(join(root, 'lib', 'client.js')).href, rev: 'test' }],
+const systemExports = loadClientModuleSystem(upstreamRoot)
+const { system, facade } = createModuleSystem(systemExports, {
+  url: pathToFileURL(join(root, 'lib', 'client.js')).href,
   staticModules: { react: React, '@deepseek-ai/dsh-client-store': createRuntimeStub() },
-  loadBundle: async (url) => { await import(url + '?loader=' + Date.now()) },
+  rev: 'lifecycle-test',
+  loadBundle: async (url) => { await import(url.split('?')[0] + '?loader=' + Date.now()) },
 })
+globalThis.__ModuleLoader__ = facade
 
 try {
   const mod = await system.import('dsh-deepread')
   assert.equal(typeof mod.apply, 'function')
-  assert.deepEqual(mod.inject, ['slots', 'sessions', 'conversation'])
+  assert.deepEqual(mod.inject, ['slots', 'sessions', 'conversation', 'uiSession'])
 
   const harness = createSlotHarness()
   const injectionDisposers = []
@@ -91,8 +95,8 @@ try {
   }
   const ctx = createEffectContext({
     slots: harness.slots,
-    sessions: { list: { getSnapshot: () => ({ current: undefined }) } },
-    conversation: { input: { for() { throw new Error('not used') } } },
+    uiSession: { adapter: { current: { value: { key: undefined } } } },
+    conversation: { input: { shell() { throw new Error('not used') } } },
   })
   mod.apply(ctx)
   assert.deepEqual([...harness.registrations.keys()], ['shell.overlay', 'conversation.input.left', 'tool.call.toolview'])
@@ -203,8 +207,8 @@ try {
   }
   const remountCtx = createEffectContext({
     slots: remountHarness.slots,
-    sessions: { list: { getSnapshot: () => ({ current: undefined }) } },
-    conversation: { input: { for() { throw new Error('not used') } } },
+    uiSession: { adapter: { current: { value: { key: undefined } } } },
+    conversation: { input: { shell() { throw new Error('not used') } } },
   })
   mod.apply(remountCtx)
   assert.equal(remountHarness.registrations.size, 3)

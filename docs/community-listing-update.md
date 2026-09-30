@@ -1,26 +1,26 @@
-# Community listing update for `1.0.1`
+# Community listing update for `1.1.0`
 
-This metadata is ready for community catalog maintainers after the `v1.0.1` tag and npm release resolve publicly.
+This metadata is ready for community catalog maintainers after the `v1.1.0` tag and npm release resolve publicly.
 
 ## Listing fields
 
 | Field | Proposed value |
 | --- | --- |
 | Package | `dsh-deepread` |
-| Version | `1.0.1` |
+| Version | `1.1.0` |
 | Summary | Evidence-first deep reading Host tool and packaged skill; optional DeepSeek Harness Web reading UI |
 | Repository | https://github.com/xiehuan123/dsh-deepread |
-| npm version | https://www.npmjs.com/package/dsh-deepread/v/1.0.1 |
-| English README | https://github.com/xiehuan123/dsh-deepread/blob/v1.0.1/README.md |
-| Chinese README | https://github.com/xiehuan123/dsh-deepread/blob/v1.0.1/README.zh.md |
-| v0.15 manifest | https://github.com/xiehuan123/dsh-deepread/blob/v1.0.1/dsh-plugin.json |
-| Release notes | https://github.com/xiehuan123/dsh-deepread/blob/v1.0.1/docs/releases/1.0.1.md |
+| npm version | https://www.npmjs.com/package/dsh-deepread/v/1.1.0 |
+| English README | https://github.com/xiehuan123/dsh-deepread/blob/v1.1.0/README.md |
+| Chinese README | https://github.com/xiehuan123/dsh-deepread/blob/v1.1.0/README.zh.md |
+| v0.15 manifest | https://github.com/xiehuan123/dsh-deepread/blob/v1.1.0/dsh-plugin.json |
+| Release notes | https://github.com/xiehuan123/dsh-deepread/blob/v1.1.0/docs/releases/1.1.0.md |
 
 ## Compatibility copy
 
 Minimum dsh-TUI version: `0.8.1`. The package ships a Host-only Community Consensus v0.15 manifest and a packaged skill. Its `lib/client.js` export is optional DeepSeek Harness Web UI, not a dsh-TUI client facet. Node.js `^22.19 || >=24` is required.
 
-DeepSeek Harness Web targets `0.1.2-rc.1`; headless retains its `0.1.0-rc.7` Host baseline. The Web client in this patch no longer targets the removed `0.1.0-rc.7` runtime facade. Web loads the browser client; headless and dsh-TUI do not. The npm package, repository, and manifest links above must replace any listing that still points to the `0.5.4` root `index.mjs` layout or describes the whole plugin as a legacy bundle/client pair.
+DeepSeek Harness Web and the desktop runtime target `0.2.0-rc.2` (Web client resolves the current session through `uiSession` and `conversation.input.shell`); `0.1.2-rc.1` hosts keep DeepRead `1.0.1`, and headless retains its `0.1.0-rc.7` Host baseline. Web loads the browser client; headless and dsh-TUI do not. The npm package, repository, and manifest links above must replace any listing that still points to the `0.5.4` root `index.mjs` layout or describes the whole plugin as a legacy bundle/client pair.
 
 ## Submission checklist
 

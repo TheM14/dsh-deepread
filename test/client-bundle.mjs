@@ -1,16 +1,16 @@
 // Client 工厂包契约测试：从 src 重建 lib/client.js，
 // 在伪造的 window.__ModuleLoader__ 上加载，验证 C6 handoff、exports（apply/inject）
 // 与三个 slot 注册（tool.call.toolview / conversation.input.left / shell.overlay）。
-import { execFileSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import assert from 'node:assert'
+import { npmExecFileSync } from './helpers/npm-run.mjs'
 import { createEffectContext, createRuntimeStub, createSlotHarness } from './helpers/client-runtime.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 
 // 从源码重建产物：保证测试验证的正是 TS 源与 tsdown 生成的 lib/client.js。
-execFileSync('npm', ['run', 'build:client'], { cwd: root, stdio: 'pipe' })
+npmExecFileSync(['run', 'build:client'], { cwd: root, stdio: 'pipe' })
 const bundlePath = join(root, 'lib/client.js')
 
 globalThis.window = globalThis
@@ -34,7 +34,7 @@ const requireStub = (spec) => {
 }
 const mod = handoff.factory(requireStub)
 assert.equal(typeof mod.apply, 'function', 'factory exports apply')
-assert.deepEqual(mod.inject, ['slots', 'sessions', 'conversation'], 'factory exports inject')
+assert.deepEqual(mod.inject, ['slots', 'sessions', 'conversation', 'uiSession'], 'factory exports inject')
 
 const slotNames = []
 const harness = createSlotHarness()
@@ -42,8 +42,8 @@ const inject = harness.slots.inject
 harness.slots.inject = (slot, provider) => { slotNames.push(slot); return inject(slot, provider) }
 const fakeCtx = createEffectContext({
   slots: harness.slots,
-  sessions: { list: { getSnapshot: () => ({ current: undefined }) } },
-  conversation: { input: { for() { throw new Error('not used') } } },
+  uiSession: { adapter: { current: { value: { key: undefined } } } },
+  conversation: { input: { shell() { throw new Error('not used') } } },
 })
 mod.apply(fakeCtx)
 assert.deepEqual(slotNames, ['shell.overlay', 'conversation.input.left', 'tool.call.toolview'])
