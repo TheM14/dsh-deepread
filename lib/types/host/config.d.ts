@@ -10,6 +10,10 @@ export declare const ConfigSchema: Schema<Schemastery.ObjectS<NoInfer<{
     estTokensPerSecond: Schema<number, number, "defined">;
     estLatencyPerCallMs: Schema<number, number, "defined">;
     backgroundMinChars: Schema<number, number, "defined">;
+    reasoningEffort: Schema<string, string, "defined">;
+    sectionMaxTokens: Schema<number, number, "defined">;
+    pythonPath: Schema<string, string, "defined">;
+    pdfParser: Schema<string, string, "defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
     timeoutMs: Schema<number, number, "defined">;
     chunkChars: Schema<number, number, "defined">;
@@ -20,5 +24,9 @@ export declare const ConfigSchema: Schema<Schemastery.ObjectS<NoInfer<{
     estTokensPerSecond: Schema<number, number, "defined">;
     estLatencyPerCallMs: Schema<number, number, "defined">;
     backgroundMinChars: Schema<number, number, "defined">;
+    reasoningEffort: Schema<string, string, "defined">;
+    sectionMaxTokens: Schema<number, number, "defined">;
+    pythonPath: Schema<string, string, "defined">;
+    pdfParser: Schema<string, string, "defined">;
 }>>, "plain">;
 export declare function resolveConfig(input: unknown): RuntimeConfig;

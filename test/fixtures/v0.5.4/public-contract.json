@@ -10,7 +10,11 @@
       "cacheTtlHours": { "type": "number", "defaultValue": 168 },
       "estTokensPerSecond": { "type": "number", "defaultValue": 0 },
       "estLatencyPerCallMs": { "type": "number", "defaultValue": 0 },
-      "backgroundMinChars": { "type": "number", "defaultValue": 9000 }
+      "backgroundMinChars": { "type": "number", "defaultValue": 9000 },
+      "reasoningEffort": { "type": "string", "defaultValue": "inherit" },
+      "sectionMaxTokens": { "type": "number", "defaultValue": 12000 },
+      "pythonPath": { "type": "string", "defaultValue": "" },
+      "pdfParser": { "type": "string", "defaultValue": "auto" }
     }
   },
   "defaultTimeoutMs": 900000,

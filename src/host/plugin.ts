@@ -13,7 +13,7 @@ import { ConfigSchema, resolveConfig } from './config.js'
 import { createUrlCache } from './cache.js'
 import { normalizeDepth, normalizeExportFormat, normalizeLanguage, parseDeepreadInput } from './analysis.js'
 import { createExportTools } from './export.js'
-import { arr, createLlmRuntime, num, splitChunks, str } from './llm.js'
+import { arr, createLlmRuntime, num, sectionPlan, splitForSections, str } from './llm.js'
 import { createPdfTools } from './pdf.js'
 import { createSourceRuntime } from './source.js'
 import type {
@@ -41,7 +41,9 @@ const EMPTY_RECORD: DataRecord = {}
 const PACKAGED_SKILL_URL = new URL('../../../skills/dsh-deepread/SKILL.md', import.meta.url)
 type ProgressCallback = (line: string) => void
 interface PreResolved { text: string; src: SourceResult; resolveMs: number }
-interface ComputeOptions { preResolved?: PreResolved; signal?: AbortLike | null | undefined; onProgress?: ProgressCallback | undefined }
+// parent 是发起本次精读的 Agent（exec.agent）。它携带当前会话的路由
+// （provider / model / reasoningEffort），是「继承已有状态」的来源。
+interface ComputeOptions { preResolved?: PreResolved; signal?: AbortLike | null | undefined; onProgress?: ProgressCallback | undefined; parent?: unknown }
 interface SanitizedSection {
   title: string
   summary: string
@@ -60,6 +62,12 @@ interface FeynmanChapter {
   gaps: string[]
   corrections: string[]
 }
+// exec.agent 是发起本次工具调用的 Agent，携带当前会话的路由。官方 tool-subagent
+// 也从同一位置取父子路由（parentAgentOptionsForDelegation 读 parent.options）。
+function parentOf(exec: unknown): unknown {
+  return isRecord(exec) && exec.agent !== undefined ? exec.agent : undefined
+}
+
 const createTool = defineTool as unknown as (definition: ToolLike) => ToolLike
 
 export const Config = ConfigSchema
@@ -86,9 +94,9 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
   const { readCacheEntry, writeCacheEntry } = createUrlCache(ctx, tune)
 
   const { callModelJson, pickConfig } = createLlmRuntime({
-    ctx, estimateTokens, llmCallStats, recordCalibration,
+    ctx, tune, estimateTokens, llmCallStats, recordCalibration,
   })
-  const { bytesToLatin1, collectPageNums, extractPdfStats, extractPdfText } = createPdfTools(estimateTokens)
+  const { collectPageNums, extractPdfStats, extractPdfText } = createPdfTools(estimateTokens, { pythonPath: tune.pythonPath, parser: tune.pdfParser })
   const { attachExports, renderMarkdown } = createExportTools(ctx, tune, {
     arr,
     num,
@@ -102,7 +110,7 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
   })
 
   const { resolveForEstimate, resolveSource } = createSourceRuntime({
-    bytesToLatin1, ctx, extractPdfStats, extractPdfText,
+    ctx, extractPdfStats, extractPdfText,
     readCacheEntry, tune, web, writeCacheEntry,
   })
 
@@ -472,12 +480,12 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
     }
   }
 
-  async function batchFlow(args: DeepreadInput, language: OutputLanguage, signal?: AbortLike | null, onProgress?: ProgressCallback): Promise<DeepreadResult> {
+  async function batchFlow(args: DeepreadInput, language: OutputLanguage, signal?: AbortLike | null, onProgress?: ProgressCallback, parent?: unknown): Promise<DeepreadResult> {
     const started = Date.now()
     const items = Array.isArray(args.batch) ? args.batch.slice(0, 10) : []
     const docs: BatchDocumentResult[] = []
     let totalChars = 0
-    const cfg = await pickConfig()
+    const cfg = await pickConfig(parent)
     const progress = typeof onProgress === 'function' ? onProgress : null
     for (let i = 0; i < items.length; i++) {
       const item = items[i]!
@@ -589,7 +597,7 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
     if (text.length > tune.maxInputChars) text = text.slice(0, tune.maxInputChars)
     const estimate = buildEstimate(text, depth)
 
-    const cfg = await pickConfig()
+    const cfg = await pickConfig(opt.parent)
 
     if (depth === 'quick') {
       const limited = text.length > 30000 ? text.slice(0, 30000) : text
@@ -611,8 +619,7 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
         return sanitizeMap(parsed, [], { ...cacheFields, source, sourceKind, chars: text.length, chunks: 1, depth: 'map', estimate, durationMs: Date.now() - started, stages: buildStages() })
       }
       const chapters: AnalysisChapter[] = []
-      let parts = splitChunks(text, CHUNK_CHARS)
-      if (parts.length > MAX_PARTS) parts = parts.slice(0, MAX_PARTS)
+      const parts = splitForSections(text, CHUNK_CHARS, MAX_PARTS)
       for (let i = 0; i < parts.length; i++) {
         if (onProgress !== null) onProgress('精读第 ' + (i + 1) + '/' + parts.length + ' 段…')
         const parsed = await callModelJson(cfg, sectionSystem('deep', language, focus), sectionUser(parts[i]!, i, parts.length), 5000, signal)
@@ -638,8 +645,7 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
           questions = arr(structParsed.questions).slice(0, 6).map((x) => String(x).trim()).filter((x) => x !== '')
         }
       }
-      let parts = splitChunks(text, CHUNK_CHARS)
-      if (parts.length > MAX_PARTS) parts = parts.slice(0, MAX_PARTS)
+      const parts = splitForSections(text, CHUNK_CHARS, MAX_PARTS)
       const feynmanChapters: FeynmanChapter[] = []
       for (let i = 0; i < parts.length; i++) {
         if (onProgress !== null) onProgress('精读第 ' + (i + 1) + '/' + parts.length + ' 段…')
@@ -680,8 +686,7 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
     const chunked = depth === 'book' || text.length > 9000
     const chapters: AnalysisChapter[] = []
     if (chunked) {
-      let parts = splitChunks(text, CHUNK_CHARS)
-      if (parts.length > MAX_PARTS) parts = parts.slice(0, MAX_PARTS)
+      const parts = splitForSections(text, CHUNK_CHARS, MAX_PARTS)
       for (let i = 0; i < parts.length; i++) {
         if (onProgress !== null) onProgress('精读第 ' + (i + 1) + '/' + parts.length + ' 段…')
         const parsed = await callModelJson(cfg, sectionSystem('deep', language, focus), sectionUser(parts[i]!, i, parts.length), 5000, signal)
@@ -770,7 +775,7 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
       const est = buildEstimate(text, depth)
       const row = est.modes.find((mm) => mm.mode === depth) ?? est.modes[0]
       minutes = row?.minutes ?? null
-      M = depth === 'quick' ? 1 : Math.max(1, Math.min(splitChunks(text, CHUNK_CHARS).length, MAX_PARTS))
+      M = depth === 'quick' ? 1 : splitForSections(text, CHUNK_CHARS, MAX_PARTS).length
     } else if (probeEst !== null) {
       // 大 PDF：全量解析在后台任务内进行，label 用采样外推估算字数/段数/预算
       chars = Math.max(1, Math.round(probeEst.estChars))
@@ -782,7 +787,7 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
       const est = buildEstimate('', depth, { chars, tokensPerChar: 0.6 })
       const row = est.modes.find((mm) => mm.mode === depth) ?? est.modes[0]
       minutes = row?.minutes ?? null
-      M = depth === 'quick' ? 1 : Math.max(1, Math.min(Math.ceil(chars / CHUNK_CHARS), MAX_PARTS))
+      M = depth === 'quick' ? 1 : sectionPlan(chars, CHUNK_CHARS, MAX_PARTS).parts
     }
 
     const label = 'deepread 精读「' + sourceLabelText + '」· ' + M + ' 段' + (minutes !== null ? ' · 预算≈' + minutes + '分钟' : '')
@@ -816,16 +821,17 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
       owner: isRecord(exec) && exec.agent !== undefined ? exec.agent : undefined,
       run: () => {
         void (async () => {
+          const parent = parentOf(exec)
           try {
             let result: DeepreadResult
             if (isBatch) {
-              result = await batchFlow(args, language, signal, onProgress)
+              result = await batchFlow(args, language, signal, onProgress, parent)
             } else if (preResolved !== null && preResolved !== undefined) {
               pushLine('已解析「' + sourceLabelText + '」（' + preResolved.text.length + ' 字' + (typeof preResolved.src.extractMs === 'number' && preResolved.src.extractMs > 0 ? '，PDF 解析 ' + preResolved.src.extractMs + 'ms' : '') + '）')
-              result = await computeResult(input, { preResolved, onProgress, signal })
+              result = await computeResult(input, { preResolved, onProgress, signal, parent })
             } else {
               // 大 PDF：解析与逐页进度在任务流内进行
-              result = await computeResult(input, { onProgress, signal })
+              result = await computeResult(input, { onProgress, signal, parent })
             }
             await attachExports(result, exportFmt)
             pushLine('【最终报告】\n' + renderMarkdown(result))
@@ -862,12 +868,13 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
     const language = normalizeLanguage(args.language)
     const isBatch = Array.isArray(args.batch) && args.batch.length >= 2
     const depth = normalizeDepth(args.depth)
+    const parent = parentOf(exec)
 
     // 预算预检 → 前台（现状）
     if (args.estimate === true) {
       const result = isBatch
         ? await batchEstimateFlow(args, language)
-        : await computeResult(input)
+        : await computeResult(input, { parent })
       await attachExports(result, exportFmt)
       return result
     }
@@ -880,14 +887,14 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
           return await startBackground(args, input, null, jobs, exec, exportFmt, language, true)
         } catch (err) { /* jobs.start 抛错 → 回退前台 */ }
       }
-      const result = await batchFlow(args, language, null)
+      const result = await batchFlow(args, language, null, undefined, parent)
       await attachExports(result, exportFmt)
       return result
     }
 
     // quick 模式 → 前台（现状）
     if (depth === 'quick') {
-      const result = await computeResult(input)
+      const result = await computeResult(input, { parent })
       await attachExports(result, exportFmt)
       return result
     }
@@ -909,7 +916,7 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
           } catch (err) { /* jobs.start 抛错 → 回退前台全量解析 */ }
         }
       }
-      const result = await computeResult(input)
+      const result = await computeResult(input, { parent })
       await attachExports(result, exportFmt)
       return result
     }
@@ -924,7 +931,7 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
 
     // 非长输入 → 前台（把预解析结果传入，避免重复 resolveSource）
     if (!isLong) {
-      const result = await computeResult(input, { preResolved })
+      const result = await computeResult(input, { preResolved, parent })
       await attachExports(result, exportFmt)
       return result
     }
@@ -939,7 +946,7 @@ function applyHost(ctx: HostContext, config?: ConfigOptions): void {
       }
     }
 
-    const result = await computeResult(input, { preResolved })
+    const result = await computeResult(input, { preResolved, parent })
     await attachExports(result, exportFmt)
     return result
   }

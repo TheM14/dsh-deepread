@@ -89,10 +89,11 @@ export function htmlToText(html: string): { title: string; text: string } {
 type ProgressCallback = (line: string) => void
 export interface SourceOptions { onProgress?: ProgressCallback | null | undefined; statsOnly?: boolean }
 interface SourceRuntimeDependencies {
-  bytesToLatin1(bytes: Uint8Array): string
   ctx: HostContext
-  extractPdfStats(latin1: string): PdfStats
-  extractPdfText(latin1: string, onPage?: (info: { done: number; total: number }) => void): string
+  // 解析器选择由 pdf.ts 决定（Python 优先、内置回退），本文件只消费结果，
+  // 因此入参是原始字节而非 latin1 —— 免得解析器选择固化到这一层。
+  extractPdfStats(bytes: Uint8Array): Promise<{ stats: PdfStats; parser: string }>
+  extractPdfText(bytes: Uint8Array, onPage?: (info: { done: number; total: number }) => void): Promise<{ text: string; parser: string }>
   readCacheEntry(url: string, ignoreTtl: boolean): Promise<CacheRecord | null>
   tune: RuntimeConfig
   web: WebService | undefined
@@ -100,7 +101,7 @@ interface SourceRuntimeDependencies {
 }
 
 export function createSourceRuntime(deps: SourceRuntimeDependencies) {
-  const { bytesToLatin1, ctx, extractPdfStats, extractPdfText, readCacheEntry, tune, web, writeCacheEntry } = deps
+  const { ctx, extractPdfStats, extractPdfText, readCacheEntry, tune, web, writeCacheEntry } = deps
 // 抓取并提取微信公众号正文：web 服务优先、全局 fetch 兜底、反爬验证页换 UA
 // 重试一次、标题前置。任何失败以异常上抛，由 resolveSource 决定回退缓存还是透传。
 async function fetchArticleText(url: string): Promise<string> {
@@ -202,37 +203,48 @@ async function resolveSource(args: DeepreadInput, opts: SourceOptions = {}): Pro
       if (!isBinaryFileService(ctx.fs)) throw new Error('文件服务不可用')
       const target = await ctx.fs.resolve(path)
       const bytes = await ctx.fs.readBytes(target, undefined, 30 * 1024 * 1024)
-      const latin = bytesToLatin1(bytes)
       const t0 = Date.now()
       if (opt.statsOnly === true) {
-        let pdfStats = null
+        let stats: PdfStats
         try {
-          pdfStats = extractPdfStats(latin)
+          stats = (await extractPdfStats(bytes)).stats
         } catch (error) {
           throw new Error('PDF 解析失败：' + errorMessage(error))
         }
-        return { text: '', source: path, sourceKind: 'pdf', pdfStats, extractMs: Date.now() - t0 }
+        return { text: '', source: path, sourceKind: 'pdf', pdfStats: stats, extractMs: Date.now() - t0 }
       }
       let extracted = ''
+      let parser = ''
       try {
         let lastPct = -1
-        extracted = extractPdfText(latin, onProgress === null ? undefined : (info) => {
-          if (info.done === 0) {
-            onProgress('解析 PDF 中…（共 ' + info.total + ' 页）')
+        let announcedTotal = false
+        const result = await extractPdfText(bytes, onProgress === null ? undefined : (info) => {
+          // 首帧 total=0：只知道「开始解析」，总页数由解析器随后报出。
+          if (info.total <= 0) {
+            onProgress('解析 PDF 中…')
             return
           }
           const total = Math.max(1, info.total)
+          if (info.done <= 0) {
+            if (!announcedTotal) {
+              announcedTotal = true
+              onProgress('解析 PDF 中…（共 ' + total + ' 页）')
+            }
+            return
+          }
           const pct = Math.round((info.done / total) * 100)
-          if (info.done >= total || pct >= lastPct + 5) {
+          if ((info.done >= total || pct >= lastPct + 5) && pct !== lastPct) {
             lastPct = pct
             onProgress('解析 PDF 中… ' + pct + '%（' + info.done + '/' + total + ' 页）')
           }
         })
+        extracted = result.text
+        parser = result.parser
       } catch (error) {
         throw new Error('PDF 解析失败：' + errorMessage(error))
       }
       if (extracted.trim() === '') throw new Error('PDF 中没有可提取的文本（可能是扫描版/图片型 PDF，建议先 OCR 或转成 txt 再精读）')
-      return { text: extracted, source: path, sourceKind: 'pdf', extractMs: Date.now() - t0 }
+      return { text: extracted, source: path, sourceKind: 'pdf', extractMs: Date.now() - t0, parser }
     }
     if (/\.(txt|md|markdown|text|html|htm|csv|json|log)$/i.test(lower)) {
       if (!isTextFileService(ctx.fs)) throw new Error('文件服务不可用')

@@ -9,13 +9,18 @@ export interface SourceOptions {
     statsOnly?: boolean;
 }
 interface SourceRuntimeDependencies {
-    bytesToLatin1(bytes: Uint8Array): string;
     ctx: HostContext;
-    extractPdfStats(latin1: string): PdfStats;
-    extractPdfText(latin1: string, onPage?: (info: {
+    extractPdfStats(bytes: Uint8Array): Promise<{
+        stats: PdfStats;
+        parser: string;
+    }>;
+    extractPdfText(bytes: Uint8Array, onPage?: (info: {
         done: number;
         total: number;
-    }) => void): string;
+    }) => void): Promise<{
+        text: string;
+        parser: string;
+    }>;
     readCacheEntry(url: string, ignoreTtl: boolean): Promise<CacheRecord | null>;
     tune: RuntimeConfig;
     web: WebService | undefined;

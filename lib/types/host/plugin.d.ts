@@ -9,6 +9,10 @@ export declare const Config: import("@deepseek-ai/schemastery").default<Schemast
     estTokensPerSecond: import("@deepseek-ai/schemastery").default<number, number, "defined">;
     estLatencyPerCallMs: import("@deepseek-ai/schemastery").default<number, number, "defined">;
     backgroundMinChars: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    reasoningEffort: import("@deepseek-ai/schemastery").default<string, string, "defined">;
+    sectionMaxTokens: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    pythonPath: import("@deepseek-ai/schemastery").default<string, string, "defined">;
+    pdfParser: import("@deepseek-ai/schemastery").default<string, string, "defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
     timeoutMs: import("@deepseek-ai/schemastery").default<number, number, "defined">;
     chunkChars: import("@deepseek-ai/schemastery").default<number, number, "defined">;
@@ -19,6 +23,10 @@ export declare const Config: import("@deepseek-ai/schemastery").default<Schemast
     estTokensPerSecond: import("@deepseek-ai/schemastery").default<number, number, "defined">;
     estLatencyPerCallMs: import("@deepseek-ai/schemastery").default<number, number, "defined">;
     backgroundMinChars: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    reasoningEffort: import("@deepseek-ai/schemastery").default<string, string, "defined">;
+    sectionMaxTokens: import("@deepseek-ai/schemastery").default<number, number, "defined">;
+    pythonPath: import("@deepseek-ai/schemastery").default<string, string, "defined">;
+    pdfParser: import("@deepseek-ai/schemastery").default<string, string, "defined">;
 }>>, "plain">;
 export declare const name = "deepread";
 export declare const inject: string[];

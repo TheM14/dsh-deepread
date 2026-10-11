@@ -1,4 +1,7 @@
-import type { PdfStats } from './types.js'
+import type { PdfParserMode, PdfStats } from './types.js'
+import { errorMessage } from './types.js'
+import { createPythonPdf } from './python-pdf.js'
+import { assessExtraction } from './quality.js'
 
 export interface PdfProgress { done: number; total: number }
 type HuffmanTable = Record<string, number>
@@ -11,7 +14,32 @@ type PdfObjectGetter = (num: string | number | undefined) => ParsedPdfObject | n
 type PdfRefResolver = (dict: string, key: string) => string | null
 type PdfMultiRefResolver = (dict: string, key: string) => string[]
 
-export function createPdfTools(estimateTokens: (text: string) => number) {
+export interface PdfPagesResult { pageCount: number; pages: string[]; parser: string }
+
+export interface PdfBridge {
+  probe(): Promise<{ path: string; ok: boolean; detail: string }>
+  pages(bytes: Uint8Array, limit?: number, onProgress?: (done: number, total: number) => void): Promise<{ pageCount: number; pages: string[] }>
+}
+
+export interface PdfToolsOptions {
+  /** 显式 Python 解释器路径；空串/缺省表示自动探测。 */
+  pythonPath?: string
+  pythonTimeoutMs?: number
+  /** 'auto'（缺省）Python 优先并回退；'python' 只用 Python；'builtin' 只用内置纯 JS。 */
+  parser?: PdfParserMode
+  /** 测试注入点；缺省在进程内创建一个真实桥。 */
+  bridge?: PdfBridge
+}
+
+export function createPdfTools(estimateTokens: (text: string) => number, options: PdfToolsOptions = {}) {
+  const bridge: PdfBridge = options.bridge ?? createPythonPdf({
+    pythonPath: options.pythonPath ?? '',
+    timeoutMs: options.pythonTimeoutMs,
+  })
+  // 记住最近一次 Python 路径的失败原因：回退内置后若质量闸门仍不合格，
+  // 需要把两条路径的情况一起上报，否则用户只看到「乱码」而不知道 Python 为什么没用上。
+  let lastPythonError: string | null = null
+
 // ---------- PDF 文本提取（纯 JS：inflate + ToUnicode） ----------
 function bytesToLatin1(bytes: Uint8Array): string {
   let s = ''
@@ -803,26 +831,70 @@ function extractPageTexts(
   return pageTexts
 }
 
-function extractPdfText(latin1: string, onPage?: (progress: PdfProgress) => void): string {
+// 统一「取每页原文」这一步：Python/PyMuPDF 优先，不可用或本次失败则回退内置纯 JS。
+// 只负责返回每页原文；页码标记与统计口径由调用方统一处理，换解析器不改变下游格式。
+async function readPages(bytes: Uint8Array, limit: number, onPage?: (progress: PdfProgress) => void): Promise<PdfPagesResult> {
+  lastPythonError = null
+  const mode: PdfParserMode = options.parser ?? 'auto'
+  if (mode !== 'builtin') {
+    const state = await bridge.probe()
+    if (state.ok) {
+      try {
+        const result = await bridge.pages(bytes, limit, onPage === undefined ? undefined : (done, total) => onPage({ done, total }))
+        return { pageCount: result.pageCount, pages: result.pages, parser: 'python-fitz' }
+      } catch (error) {
+        // Python 可用但这次没成功（加密 / 损坏 / 超时）→ auto 模式回退内置。
+        lastPythonError = errorMessage(error)
+      }
+    } else {
+      lastPythonError = state.detail
+    }
+    if (mode === 'python') {
+      throw new Error('已配置 pdfParser=python，但 Python 路径不可用或解析失败：' + (lastPythonError ?? '未知原因'))
+    }
+  }
+  const latin1 = bytesToLatin1(bytes)
   if (latin1.slice(0, 5) !== '%PDF-') throw new Error('不是有效的 PDF 文件')
-  const state = collectPageNums(latin1)
-  const pageCb = typeof onPage === 'function' ? onPage : null
-  if (pageCb !== null) pageCb({ total: state.pageNums.length, done: 0 })
-  const pageTexts = extractPageTexts(state.pageNums, state.getObject, state.resolveRef, state.resolveMultiRef, pageCb)
-  const pages = pageTexts.filter((t) => t.trim() !== '')
-  return pages.map((t, i) => '【第' + (i + 1) + '页】\n' + t).join('\n\n')
+  const state2 = collectPageNums(latin1)
+  const nums = limit > 0 ? state2.pageNums.slice(0, limit) : state2.pageNums
+  // 与 Python 路径对齐：解析前先报总页数（Python 侧由脚本首行报出）。
+  if (onPage !== undefined) onPage({ done: 0, total: state2.pageNums.length })
+  const texts = extractPageTexts(nums, state2.getObject, state2.resolveRef, state2.resolveMultiRef, onPage)
+  return { pageCount: state2.pageNums.length, pages: texts, parser: 'builtin-js' }
+}
+
+// 页码取「文档中的真实页序」，不再按「过滤空页后重新编号」——
+// 后者在文中存在空白页时会让标记整体偏移，引用溯源随之错位。
+function withPageMarkers(pages: string[]): string {
+  return pages
+    .map((text, index) => ({ page: index + 1, text }))
+    .filter((entry) => entry.text.trim() !== '')
+    .map((entry) => '【第' + entry.page + '页】\n' + entry.text)
+    .join('\n\n')
+}
+
+async function extractPdfText(bytes: Uint8Array, onPage?: (progress: PdfProgress) => void): Promise<{ text: string; parser: string }> {
+  const pageCb = typeof onPage === 'function' ? onPage : undefined
+  // 首帧只表示「开始解析」；总页数由解析器随后报出，最终 100% 由最后一页的进度帧给出。
+  if (pageCb !== undefined) pageCb({ done: 0, total: 0 })
+  const result = await readPages(bytes, 0, pageCb)
+  const text = withPageMarkers(result.pages)
+  const quality = assessExtraction(text)
+  if (!quality.ok) {
+    const pythonNote = lastPythonError === null ? '' : '；Python 路径失败原因：' + lastPythonError
+    throw new Error('PDF 抽取质量不合格（实际解析器 ' + result.parser + pythonNote + '）：' + quality.reason
+      + '。请改用 OCR 版本，或把正文粘贴为文本后再精读。')
+  }
+  return { text, parser: result.parser }
 }
 
 // 采样快速预检：只解析结构与前 2 页文本，避免大 PDF 全量提取。
-function extractPdfStats(latin1: string): PdfStats {
-  if (latin1.slice(0, 5) !== '%PDF-') throw new Error('不是有效的 PDF 文件')
-  const state = collectPageNums(latin1)
-  const pages = state.pageNums.length
-  const sample = state.pageNums.slice(0, 2)
-  const pageTexts = extractPageTexts(sample, state.getObject, state.resolveRef, state.resolveMultiRef)
+async function extractPdfStats(bytes: Uint8Array): Promise<{ stats: PdfStats; parser: string }> {
+  const result = await readPages(bytes, 2)
+  const pageTexts = result.pages
   const sampleChars = pageTexts.reduce((n, t) => n + t.length, 0)
   const sampleTokens = estimateTokens(pageTexts.join('\n'))
-  return { pages, samplePages: 2, sampleChars, sampleTokens }
+  return { stats: { pages: result.pageCount, samplePages: 2, sampleChars, sampleTokens }, parser: result.parser }
 }
 
 

@@ -9,6 +9,12 @@ export interface Config {
     estTokensPerSecond?: number;
     estLatencyPerCallMs?: number;
     backgroundMinChars?: number;
+    reasoningEffort?: ReasoningEffortMode;
+    sectionMaxTokens?: number;
+    /** 显式 Python 解释器路径（需可 import fitz）；空串表示自动探测。 */
+    pythonPath?: string;
+    /** PDF 解析器选择：auto=Python 优先、内置回退；python=只用 Python；builtin=只用内置。 */
+    pdfParser?: PdfParserMode;
 }
 export interface RuntimeConfig {
     timeoutMs: number;
@@ -20,7 +26,12 @@ export interface RuntimeConfig {
     estTokensPerSecond: number;
     estLatencyPerCallMs: number;
     backgroundMinChars: number;
+    reasoningEffort: ReasoningEffortMode;
+    sectionMaxTokens: number;
+    pythonPath: string;
+    pdfParser: PdfParserMode;
 }
+export type PdfParserMode = 'auto' | 'python' | 'builtin';
 export type DeepreadDepth = 'quick' | 'deep' | 'map' | 'feynman' | 'book';
 export type OutputLanguage = 'zh' | 'en' | 'auto';
 export type ExportFormat = 'none' | 'md' | 'mm' | 'html' | 'all';
@@ -77,6 +88,8 @@ export interface SourceResult {
     note?: string;
     extractMs?: number;
     pdfStats?: PdfStats;
+    /** 实际使用的 PDF 解析器（python-fitz / builtin-js），供报告与排错对照。 */
+    parser?: string;
 }
 export interface ResultMetadata {
     source: string;
@@ -275,6 +288,7 @@ export interface DeepreadResult {
 export interface AbortLike {
     readonly aborted: boolean;
 }
+export type ReasoningEffortMode = 'inherit' | 'off' | 'low' | 'high' | 'max';
 export interface ModelSelection {
     provider: string;
     model: string;

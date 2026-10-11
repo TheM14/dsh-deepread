@@ -1,4 +1,4 @@
-import type { AbortLike, HostContext, ModelSelection } from './types.js'
+import type { AbortLike, HostContext, ModelSelection, ReasoningEffortMode, RuntimeConfig } from './types.js'
 import { errorMessage, isLlmCatalogService, isLlmStreamService, isRecord } from './types.js'
 
 export function str(v: unknown, fallback: string): string {
@@ -84,16 +84,68 @@ export function splitChunks(text: string, size: number): string[] {
 }
 
 
+// 分段计划：先按 chunkChars 切；段数超过上限时**放大窗口重切**，而不是丢弃尾部。
+//
+// 旧写法是运行时 parts.slice(0, MAX_PARTS)：第 MAX_PARTS 段之后的内容被直接扔掉，
+// 而综合提示词仍写着「全文共 N 字，分为 MAX_PARTS 个部分」——等于告诉模型它读完了。
+// 长文（> chunkChars × maxSections）的结论与参考文献正好落在被丢弃的尾部。
+// 预检（budget.ts）本来就按「未截断」算段数，所以这个修复同时让运行时与预检对齐。
+export function sectionPlan(length: number, chunkChars: number, maxSections: number): { partSize: number; parts: number } {
+  const size = chunkChars > 0 ? chunkChars : 6000
+  const cap = maxSections > 0 ? maxSections : 20
+  const partSize = Math.max(size, Math.ceil(length / cap))
+  const parts = Math.max(1, Math.min(Math.ceil(length / partSize), cap))
+  return { partSize, parts }
+}
+
+export function splitForSections(text: string, chunkChars: number, maxSections: number): string[] {
+  const size = chunkChars > 0 ? chunkChars : 6000
+  const cap = maxSections > 0 ? maxSections : 20
+  const first = splitChunks(text, size)
+  // 未超上限：保持 splitChunks 的自然粒度（按段落边界切，可能比 chars/chunkChars 略多几段）。
+  // 这里必须与上限比较，不能与 sectionPlan 的估算段数比较——后者不含段落边界信息，
+  // 拿来比较会把本不需要归并的段落强行合并，反而把粒度改粗。
+  if (first.length <= cap) return first
+  const { partSize, parts } = sectionPlan(text.length, size, cap)
+  const second = splitChunks(text, partSize)
+  if (second.length <= parts) return second
+  // 放大窗口后仍多于计划段数：按组归并。归并仍是文本拼接，不丢内容；
+  // 宁可段落略大，也不静默丢尾。
+  const groupSize = Math.ceil(second.length / parts)
+  const merged: string[] = []
+  for (let i = 0; i < second.length; i += groupSize) merged.push(second.slice(i, i + groupSize).join('\n\n'))
+  return merged
+}
+
 interface LlmRuntimeDependencies {
   ctx: HostContext
+  tune: RuntimeConfig
   estimateTokens(text: string): number
   llmCallStats: { calls: number; ms: number }
   recordCalibration(rateTokPerSec: number, latencyMs: number): void
 }
 
 export function createLlmRuntime(deps: LlmRuntimeDependencies) {
-  const { ctx, estimateTokens, llmCallStats, recordCalibration } = deps
-function selectedModel(): ModelSelection | null {
+  const { ctx, tune, estimateTokens, llmCallStats, recordCalibration } = deps
+
+// 路由来源优先级：
+//   1. 当前会话的 Agent 路由（exec.agent.options）—— 即「继承已有状态」；官方
+//      tool-subagent 用的也是这个来源（parentAgentOptionsForDelegation 读 parent.options）。
+//   2. agentDefaultModel 服务的当前选择（旧路径，保留兼容）。
+//   3. 目录里第一个 provider/model —— 仅作最后兜底。
+// 第 3 步是旧实现唯一的来源，风险在于可能选到一个没配 key 的 provider，
+// 表现为「模型返回了空结果」这类无信息故障；现在它退到最后。
+function routeFromAgent(parent: unknown): ModelSelection | null {
+  if (!isRecord(parent)) return null
+  const options = isRecord(parent.options) ? parent.options : null
+  if (options === null) return null
+  const provider = typeof options.provider === 'string' && options.provider !== '' ? options.provider : null
+  const model = typeof options.model === 'string' && options.model !== '' ? options.model : null
+  if (provider === null || model === null) return null
+  return { provider, model, reasoningEffort: options.reasoningEffort }
+}
+
+function routeFromCatalog(): ModelSelection | null {
   const sel = ctx.get('agentDefaultModel')
   if (sel !== undefined && typeof sel.currentSelection === 'function') {
     const s = sel.currentSelection()
@@ -104,8 +156,12 @@ function selectedModel(): ModelSelection | null {
   return null
 }
 
-async function pickConfig(): Promise<ModelSelection> {
-  const cfg = selectedModel()
+function selectedModel(parent?: unknown): ModelSelection | null {
+  return routeFromAgent(parent) ?? routeFromCatalog()
+}
+
+async function pickConfig(parent?: unknown): Promise<ModelSelection> {
+  const cfg = selectedModel(parent)
   if (cfg !== null) return cfg
   if (!isLlmCatalogService(ctx.llm)) {
     throw new Error('没有可用的模型 Provider，无法执行精读分析')
@@ -131,8 +187,49 @@ async function pickConfig(): Promise<ModelSelection> {
   return { provider: providerId, model: modelId }
 }
 
+// 思考预算：'inherit' 沿用会话路由上的等级，其余模式显式覆盖。
+function effortFor(mode: ReasoningEffortMode, routeEffort: unknown): unknown {
+  if (mode === 'inherit') return routeEffort
+  return mode
+}
+
+// 排空一次流式调用。诊断信息（收到的 chunk 类型与 finish 原因）随空结果一起抛出，
+// 否则只报「模型返回了空结果」时无法判断是上游根本没吐 text-delta，还是判定类型不匹配。
+async function drain(options: Record<string, unknown>, signal?: AbortLike | null): Promise<string> {
+  if (!isLlmStreamService(ctx.llm)) throw new Error('模型服务不支持流式调用')
+  let text = ''
+  let failure: string | null = null
+  const kinds = new Set<string>()
+  let finish = ''
+  for await (const chunk of ctx.llm.stream(options)) {
+    if (signal !== undefined && signal !== null && signal.aborted) throw new Error('任务已取消')
+    if (!isRecord(chunk)) { kinds.add('non-record'); continue }
+    const type = typeof chunk.type === 'string' ? chunk.type : 'unknown'
+    kinds.add(type)
+    if (type === 'text-delta' && typeof chunk.text === 'string') {
+      text += chunk.text
+    } else if (type === 'finish') {
+      const reason = chunk.reason
+      if (isRecord(reason)) {
+        const failDetail = isRecord(reason.failure) ? '（' + str(reason.failure.message, str(reason.failure.code, '模型调用失败')) + '）' : ''
+        finish = str(reason.kind, 'unknown') + failDetail
+        if (reason.kind === 'error' || reason.kind === 'aborted') {
+          const f = reason.failure
+          failure = isRecord(f) ? str(f.message, str(f.code, '模型调用失败')) : '模型调用失败'
+        }
+      }
+    }
+  }
+  if (failure !== null) throw new Error('模型调用失败：' + failure)
+  if (text.trim() === '') {
+    const seen = kinds.size === 0 ? '未收到任何 chunk' : [...kinds].join(',')
+    throw new Error('模型返回了空结果（chunk：' + seen + '；finish：' + (finish === '' ? '无' : finish) + '）')
+  }
+  return text
+}
+
 async function callModel(cfg: ModelSelection, system: string, userText: string, maxTokens: number, signal?: AbortLike | null): Promise<string> {
-  const options = {
+  const base: Record<string, unknown> = {
     provider: cfg.provider,
     model: cfg.model,
     system,
@@ -140,26 +237,17 @@ async function callModel(cfg: ModelSelection, system: string, userText: string, 
     temperature: 0.2,
     maxTokens,
   }
-  // 不转发 reasoningEffort：结构化 JSON 输出不需要长思考，推理会吃光小输出预算导致空结果
-  let text = ''
-  let failure: string | null = null
-  if (!isLlmStreamService(ctx.llm)) throw new Error('模型服务不支持流式调用')
-  for await (const chunk of ctx.llm.stream(options)) {
-    if (signal !== undefined && signal !== null && signal.aborted) throw new Error('任务已取消')
-    if (!isRecord(chunk)) continue
-    if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
-      text += chunk.text
-    } else if (chunk.type === 'finish') {
-      const reason = chunk.reason
-      if (isRecord(reason) && (reason.kind === 'error' || reason.kind === 'aborted')) {
-        const f = reason.failure
-        failure = isRecord(f) ? str(f.message, str(f.code, '模型调用失败')) : '模型调用失败'
-      }
-    }
+  const effort = effortFor(tune.reasoningEffort, cfg.reasoningEffort)
+  if (effort === undefined || effort === null) return await drain(base, signal)
+  try {
+    return await drain({ ...base, reasoningEffort: effort }, signal)
+  } catch (err) {
+    const message = errorMessage(err)
+    // 目标模型没声明该档思考等级 → 退化为「不传该字段」重试一次，
+    // 不让一次配置档位把整次精读打成失败。
+    if (!/UNSUPPORTED_REASONING_EFFORT|does not support reasoning effort/i.test(message)) throw err
+    return await drain(base, signal)
   }
-  if (failure !== null) throw new Error('模型调用失败：' + failure)
-  if (text.trim() === '') throw new Error('模型返回了空结果')
-  return text
 }
 
 // 判定输出是否被 token 预算截断：JSON 解析失败且文本未正常闭合（对象/数组中途断开）。
@@ -174,9 +262,12 @@ function looksTruncated(text: string): boolean {
 // 截断输出会逐步加大输出预算（×1.5，硬顶 16000），纯格式问题用校正提示
 // 同预算重试；最终失败时保留每个 attempt 的真实原因，不做无信息的吞没。
 async function callModelJson(cfg: ModelSelection, system: string, userText: string, maxTokens: number, signal?: AbortLike | null): Promise<unknown> {
-  const MAX_BUDGET = 16000
+  // 输出预算下限：推理 token 与正文共享 maxTokens，而各调用点的字面量（2500/4000/5000）
+  // 是按「不思考」的调用设定的。一旦转发思考预算，就必须同时抬高下限，否则会人为
+  // 造出空结果与截断。字面量保留在调用点，抬升集中在这里，避免散落 12 处改动。
+  const MAX_BUDGET = Math.max(16000, tune.sectionMaxTokens * 2)
   let prompt = userText
-  let budget = maxTokens
+  let budget = Math.max(maxTokens, tune.sectionMaxTokens)
   const history: Array<{ text: string; error: string | null }> = []
   const callStarted = Date.now()
   for (let attempt = 0; attempt < 3; attempt++) {

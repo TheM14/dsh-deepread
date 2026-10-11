@@ -1,4 +1,5 @@
 import type { DeepreadDepth, EstimateCall, EstimateResult, RuntimeConfig } from './types.js'
+import { sectionPlan } from './llm.js'
 
 const EST_PROMPT_OVERHEAD = 600
 
@@ -42,8 +43,9 @@ export function createBudgetRuntime(
     const tokenRatio = extrapolated !== null && typeof extrapolated.tokensPerChar === 'number' && extrapolated.tokensPerChar > 0 ? extrapolated.tokensPerChar : null
     const tokOf = (length: number): number => tokenRatio === null ? estimateTokens(text.slice(0, length)) : Math.ceil(length * tokenRatio)
     const effectiveLength = Math.min(chars, tune.maxInputChars)
-    const parts = Math.min(Math.ceil(effectiveLength / tune.chunkChars), tune.maxParts)
-    const perInput = tokOf(Math.min(effectiveLength, tune.chunkChars)) + EST_PROMPT_OVERHEAD
+    // 与运行时同源：超限时放大段长，而不是丢弃尾部，所以段长不能固定等于 chunkChars。
+    const { partSize, parts } = sectionPlan(effectiveLength, tune.chunkChars, tune.maxParts)
+    const perInput = tokOf(Math.min(effectiveLength, partSize)) + EST_PROMPT_OVERHEAD
     const summaryInput = parts * 400 + EST_PROMPT_OVERHEAD
     const modes: EstimateResult['modes'] = []
     modes.push({ mode: 'quick', note: '单次调用，输入截断至 30000 字', ...estimateCall(1, tokOf(Math.min(effectiveLength, 30000)) + EST_PROMPT_OVERHEAD, 2500) })

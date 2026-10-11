@@ -63,15 +63,16 @@ function makePdfCtx() {
 }
 
 const fixture = join(root, 'test', 'fixtures', 'objstm.pdf')
-const latin1Of = (bytes) => Buffer.from(bytes).toString('latin1')
 
 // 场景 1：extractPdfStats 对 ObjStm fixture 返回 pages=1 且 sampleChars>0
 {
   const h = makePdfCtx()
-  mod.apply(h.ctx, undefined)
+  // 固定内置解析器：本测试只关心采样口径，不应随机器上是否装有 PyMuPDF 而变。
+  mod.apply(h.ctx, { pdfParser: 'builtin' })
   assert.ok(typeof h.tool.__extractPdfStats === 'function', '暴露 __extractPdfStats 测试钩子')
   const bytes = await readFile(fixture)
-  const stats = h.tool.__extractPdfStats(latin1Of(bytes))
+  const { stats, parser } = await h.tool.__extractPdfStats(bytes)
+  assert.equal(parser, 'builtin-js', 'pdfParser=builtin 必须走内置解析器')
   assert.equal(stats.pages, 1, 'fixture 总页数应为 1')
   assert.ok(stats.sampleChars > 0, 'fixture 采样字符数应 > 0')
   assert.equal(stats.samplePages, 2, 'samplePages 恒为 2')
@@ -89,9 +90,9 @@ try {
 
 if (bigPdfExists) {
   const h = makePdfCtx()
-  mod.apply(h.ctx, undefined)
+  mod.apply(h.ctx, { pdfParser: 'builtin' })
   const bytes = await readFile(bigPdf)
-  const stats = h.tool.__extractPdfStats(latin1Of(bytes))
+  const { stats } = await h.tool.__extractPdfStats(bytes)
   assert.equal(stats.pages, 479, '98099749.pdf 应为 479 页')
   const extrapolated = Math.round((stats.sampleChars / stats.samplePages) * stats.pages)
   // 前 2 页含封面（标题页，约 99 字），导致采样偏低；外推值应落在「一本书」数量级（8 万~50 万字）。
@@ -104,7 +105,7 @@ if (bigPdfExists) {
 // 场景 3：estimate 模式对 >2MB PDF 走采样外推（返回 pdfStats + 「按采样外推」标注）
 if (bigPdfExists) {
   const h = makePdfCtx()
-  mod.apply(h.ctx, undefined)
+  mod.apply(h.ctx, { pdfParser: 'builtin' })
   const r = await h.tool.execute({ path: bigPdf, depth: 'deep', estimate: true })
   assert.equal(r.kind, 'estimate')
   assert.ok(r.meta.pdfStats, 'estimate 结果应带 pdfStats')

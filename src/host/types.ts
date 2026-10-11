@@ -10,6 +10,12 @@ export interface Config {
   estTokensPerSecond?: number
   estLatencyPerCallMs?: number
   backgroundMinChars?: number
+  reasoningEffort?: ReasoningEffortMode
+  sectionMaxTokens?: number
+  /** 显式 Python 解释器路径（需可 import fitz）；空串表示自动探测。 */
+  pythonPath?: string
+  /** PDF 解析器选择：auto=Python 优先、内置回退；python=只用 Python；builtin=只用内置。 */
+  pdfParser?: PdfParserMode
 }
 
 export interface RuntimeConfig {
@@ -22,7 +28,13 @@ export interface RuntimeConfig {
   estTokensPerSecond: number
   estLatencyPerCallMs: number
   backgroundMinChars: number
+  reasoningEffort: ReasoningEffortMode
+  sectionMaxTokens: number
+  pythonPath: string
+  pdfParser: PdfParserMode
 }
+
+export type PdfParserMode = 'auto' | 'python' | 'builtin'
 
 export type DeepreadDepth = 'quick' | 'deep' | 'map' | 'feynman' | 'book'
 export type OutputLanguage = 'zh' | 'en' | 'auto'
@@ -87,6 +99,8 @@ export interface SourceResult {
   note?: string
   extractMs?: number
   pdfStats?: PdfStats
+  /** 实际使用的 PDF 解析器（python-fitz / builtin-js），供报告与排错对照。 */
+  parser?: string
 }
 
 export interface ResultMetadata {
@@ -219,6 +233,11 @@ export interface DeepreadResult {
 export interface AbortLike {
   readonly aborted: boolean
 }
+
+// 思考预算的取法。'inherit' 沿用会话当前路由的等级；其余为显式覆盖。
+// 'off' 只在目标模型确实声明了该档时才可用，否则宿主会抛 UNSUPPORTED_REASONING_EFFORT
+// （llm.ts 捕获该错误后退化为「不传该字段」重试一次，不会让整次精读失败）。
+export type ReasoningEffortMode = 'inherit' | 'off' | 'low' | 'high' | 'max'
 
 export interface ModelSelection {
   provider: string
